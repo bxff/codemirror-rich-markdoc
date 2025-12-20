@@ -43,7 +43,41 @@ export default class RichEditPlugin implements PluginValue {
     let [cursor] = view.state.selection.ranges;
 
     for (let { from, to } of view.visibleRanges) {
-      syntaxTree(view.state).iterate({
+      let tree = syntaxTree(view.state);
+      let incomplete: { from: number, to: number }[] = [];
+
+      tree.iterate({
+        from, to,
+        enter(node) {
+          if (node.name === 'Paragraph') {
+            let paragraphIncomplete = false;
+            tree.iterate({
+              from: node.from, to: node.to,
+              enter(inner) {
+                if (inner.name === 'Emphasis' || inner.name === 'StrongEmphasis') {
+                  let hasClose = false;
+                  for (let cur = inner.node.firstChild; cur; cur = cur.nextSibling) {
+                    if (cur.name === 'EmphasisMark' && cur.to === inner.to) {
+                      hasClose = true;
+                      break;
+                    }
+                  }
+                  if (!hasClose) {
+                    paragraphIncomplete = true;
+                    return false;
+                  }
+                }
+                return true;
+              }
+            });
+            if (paragraphIncomplete) {
+              incomplete.push({ from: node.from, to: node.to });
+            }
+          }
+        }
+      });
+
+      tree.iterate({
         from, to,
         enter(node) {
           if (node.name === 'MarkdocTag')
@@ -63,13 +97,25 @@ export default class RichEditPlugin implements PluginValue {
           if (node.name === 'HeaderMark')
             widgets.push(decorationHidden.range(node.from, node.to + 1));
 
-          if (tokenHidden.includes(node.name))
+          if (tokenHidden.includes(node.name)) {
+            if (node.name === 'EmphasisMark') {
+              let parent = node.node.parent;
+              let isAffected = incomplete.some(inc =>
+                (node.from >= inc.from && node.to <= inc.to) ||
+                (parent && (parent.name === 'Emphasis' || parent.name === 'StrongEmphasis') && (
+                  (inc.from >= parent.from && inc.from < parent.to) ||
+                  (parent.from >= inc.from && parent.from < inc.to)
+                ))
+              );
+              if (isAffected) return;
+            }
             widgets.push(decorationHidden.range(node.from, node.to));
+          }
         }
       });
     }
 
-    return Decoration.set(widgets);
+    return Decoration.set(widgets, true);
   }
 }
 

@@ -3,6 +3,7 @@ import { syntaxHighlighting } from '@codemirror/language';
 import { markdown } from '@codemirror/lang-markdown';
 
 import tagParser from './tagParser';
+import { IncompleteEmp } from './incomplete-emphases';
 import highlightStyle from './highlightStyle';
 import RichEditPlugin from './richEdit';
 import renderBlock from './renderBlock';
@@ -14,12 +15,12 @@ export type MarkdocPluginConfig = { lezer?: any, markdoc: Config };
 export default function (config: MarkdocPluginConfig) {
   const mergedConfig = {
     ...config.lezer ?? [],
-    extensions: [tagParser, ...config.lezer?.extensions ?? []]
+    extensions: [tagParser, IncompleteEmp, ...config.lezer?.extensions ?? []]
   };
 
   return ViewPlugin.fromClass(RichEditPlugin, {
     decorations: v => v.decorations,
-    provide: v => [
+    provide: _v => [
       renderBlock(config.markdoc),
       syntaxHighlighting(highlightStyle),
       markdown(mergedConfig)
