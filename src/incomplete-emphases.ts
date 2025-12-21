@@ -27,7 +27,7 @@ export const IncompleteEmp: MarkdownConfig = {
                 let canClose = rightFlanking && (cx.char(start) == 42 || !leftFlanking || pAfter)
 
                 parts.push(new InlineDelimiter(cx.char(start) == 95 ? EmphasisUnderscore : EmphasisAsterisk, start, pos,
-                    (canOpen ? Mark.Open : 0) | (canClose ? Mark.Close : 0)))
+                    (canOpen ? Mark.Open : 0) | (canClose ? Mark.Close : 0), start, pos))
                 start = pos
             }
 
@@ -56,7 +56,9 @@ class InlineDelimiter {
     constructor(readonly type: DelimiterType,
         public from: number,
         public to: number,
-        public side: Mark) { }
+        public side: Mark,
+        public origFrom: number,
+        public origTo: number) { }
 }
 
 interface Segment {
@@ -69,7 +71,7 @@ interface Segment {
 
 function collectSegments(parts: InlineDelimiter[], blockEnd: number): Segment[] {
     let segments: Segment[] = [];
-    let delims = parts.map(p => new InlineDelimiter(p.type, p.from, p.to, p.side));
+    let delims = parts.map(p => new InlineDelimiter(p.type, p.from, p.to, p.side, p.origFrom, p.origTo));
 
     // ATOMIC MATCHING: 
     // Pass 1: Strong (Exactly 2 or 3)
@@ -108,10 +110,10 @@ function collectSegments(parts: InlineDelimiter[], blockEnd: number): Segment[] 
                 let open = delims[openIdx];
                 segments.push({
                     type: pass == 1 ? "Emphasis" : "StrongEmphasis",
-                    from: open.to - pass,
-                    to: close.from + pass,
-                    markSizeOpen: pass,
-                    markSizeClose: pass
+                    from: open.origFrom,
+                    to: close.origTo,
+                    markSizeOpen: open.origTo - open.origFrom,
+                    markSizeClose: close.origTo - close.origFrom
                 });
                 open.to -= pass;
                 close.from += pass;
@@ -131,9 +133,9 @@ function collectSegments(parts: InlineDelimiter[], blockEnd: number): Segment[] 
             let size = len >= 2 ? 2 : 1;
             segments.push({
                 type: size == 1 ? "Emphasis" : "StrongEmphasis",
-                from: (d.side & Mark.Open) ? d.to - size : d.from,
+                from: d.origFrom,
                 to: blockEnd,
-                markSizeOpen: size,
+                markSizeOpen: d.origTo - d.origFrom,
                 markSizeClose: 0
             });
             if (d.side & Mark.Open) d.to -= size;
