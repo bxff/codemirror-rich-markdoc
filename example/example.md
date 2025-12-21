@@ -2,6 +2,15 @@
 
 This is an *example* of **formatted** text with a [link](/doc) and a `code span`.
 
+## Partial Emphasis & Overlapping
+
+The parser accurately handles complex and unstable emphasis states:
+
+- **Overlapping Styles**: *italics and **italics-bold* bold only**
+- **Atomic Matching**: **this is bold* and this is not italics (prevents "star stealing")
+- **Shared Delimiters**: **shared***italics* or *shared***bold**
+- **Incomplete States**: *unclosed italics and **unclosed bold (markers stay visible)
+
 ## Markdoc tags
 
 ### Callout
