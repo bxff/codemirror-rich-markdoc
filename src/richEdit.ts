@@ -55,16 +55,35 @@ export default class RichEditPlugin implements PluginValue {
               from: node.from, to: node.to,
               enter(inner) {
                 if (inner.name === 'Emphasis' || inner.name === 'StrongEmphasis') {
+                  let hasOpen = false;
                   let hasClose = false;
+                  let openMark = null;
+                  let closeMark = null;
                   for (let cur = inner.node.firstChild; cur; cur = cur.nextSibling) {
-                    if (cur.name === 'EmphasisMark' && cur.to === inner.to) {
-                      hasClose = true;
-                      break;
+                    if (cur.name === 'EmphasisMark') {
+                      if (cur.from === inner.from) {
+                        hasOpen = true;
+                        openMark = cur;
+                      }
+                      if (cur.to === inner.to) {
+                        hasClose = true;
+                        closeMark = cur;
+                      }
                     }
                   }
-                  if (!hasClose) {
+                  if (!hasOpen || !hasClose || (openMark && openMark === closeMark)) {
                     paragraphIncomplete = true;
                     return false;
+                  }
+
+                  // Fragmented nodes (mismatched mark sizes) are also "incomplete" for visibility purposes
+                  if (openMark && closeMark) {
+                    let openSize = openMark.to - openMark.from;
+                    let closeSize = closeMark.to - closeMark.from;
+                    if (openSize !== closeSize) {
+                      paragraphIncomplete = true;
+                      return false;
+                    }
                   }
                 }
                 return true;
