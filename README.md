@@ -12,6 +12,10 @@ When you add the plugin to a CodeMirror `EditorState`, you can optionally pass i
 
 This plugin is inspired by [HyperMD](https://github.com/laobubu/HyperMD), a CodeMirror 5 rich Markdown plugin that is no longer actively maintained. This plugin is written from scratch and does not use any existing HyperMD code, but it aims to bring similar functionality to CodeMirror 6.
 
+## Recent Improvements
+
+**Partial Emphasis Support**: Recent updates have significantly enhanced the plugin's handling of emphasis and nested styling. The parser now robustly manages overlapping emphasis tags—such as `*a**b*c`—using a recursive fragmentation strategy that maintains document structure integrity and ensures continuous styling. Delimiter matching has been made more precise with strict size-parity enforcement for `*` and `**` tokens, which eliminates ambiguity where stars might be incorrectly reassigned between italics and bold regions. Formatting characters now remain visible in "unstable" states like `*test**` until all tags are properly closed, providing better visual feedback during editing. Additionally, triple-star clusters (`***`) are now supported as shared delimiters that can bridge adjacent italics and bold regions with uniform, combined styling.
+
 ## Known Issues
 
 * It is still missing proper support for Markdown image syntax
