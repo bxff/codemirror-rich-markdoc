@@ -127,6 +127,10 @@ function collectSegments(parts: InlineDelimiter[], blockEnd: number): Segment[] 
     delims.sort((a, b) => a.from - b.from);
     for (let d of delims) {
         if (!d) continue;
+        // Strict consistency: Only a delimiter that CAN open should start an incomplete block.
+        // Closers that failed to match should remain as literal text.
+        if (!(d.side & Mark.Open)) continue;
+
         while (d.to > d.from) {
             let len = d.to - d.from;
             // Still prefer Bold (2) for incomplete if 2+ stars left

@@ -44,56 +44,57 @@ export default class RichEditPlugin implements PluginValue {
 
     for (let { from, to } of view.visibleRanges) {
       let tree = syntaxTree(view.state);
-      let incomplete: { from: number, to: number }[] = [];
 
+      // First pass: collect ALL emphasis nodes in the paragraph
+      let allEmphasis: { from: number, to: number }[] = [];
       tree.iterate({
         from, to,
         enter(node) {
-          if (node.name === 'Paragraph') {
-            let paragraphIncomplete = false;
-            tree.iterate({
-              from: node.from, to: node.to,
-              enter(inner) {
-                if (inner.name === 'Emphasis' || inner.name === 'StrongEmphasis') {
-                  let hasOpen = false;
-                  let hasClose = false;
-                  let openMark = null;
-                  let closeMark = null;
-                  for (let cur = inner.node.firstChild; cur; cur = cur.nextSibling) {
-                    if (cur.name === 'EmphasisMark') {
-                      if (cur.from === inner.from) {
-                        hasOpen = true;
-                        openMark = cur;
-                      }
-                      if (cur.to === inner.to) {
-                        hasClose = true;
-                        closeMark = cur;
-                      }
-                    }
-                  }
-                  if (!hasOpen || !hasClose || (openMark && openMark === closeMark)) {
-                    paragraphIncomplete = true;
-                    return false;
-                  }
+          if (node.name === 'Emphasis' || node.name === 'StrongEmphasis') {
+            allEmphasis.push({ from: node.from, to: node.to });
+          }
+        }
+      });
 
-                  // Fragmented nodes (mismatched mark sizes) are also "incomplete" for visibility purposes
-                  if (openMark && closeMark) {
-                    let openSize = openMark.to - openMark.from;
-                    let closeSize = closeMark.to - closeMark.from;
-                    if (openSize !== closeSize) {
-                      paragraphIncomplete = true;
-                      return false;
-                    }
-                  }
-                }
-                return true;
-              }
-            });
-            if (paragraphIncomplete) {
-              incomplete.push({ from: node.from, to: node.to });
+      // Find connected chains: nodes that share boundaries or overlap
+      function findConnected(nodes: { from: number, to: number }[], start: { from: number, to: number }): Set<string> {
+        let connected = new Set<string>();
+        let queue = [start];
+        while (queue.length > 0) {
+          let current = queue.shift()!;
+          let key = `${current.from}-${current.to}`;
+          if (connected.has(key)) continue;
+          connected.add(key);
+          // Find nodes that share a boundary or overlap with current
+          for (let n of nodes) {
+            let nKey = `${n.from}-${n.to}`;
+            if (connected.has(nKey)) continue;
+            // Connected if: boundaries touch, or one contains the other, or they overlap
+            if (n.to === current.from || n.from === current.to || // touching
+                (n.from <= current.from && n.to >= current.to) || // n contains current
+                (current.from <= n.from && current.to >= n.to) || // current contains n
+                (n.from < current.to && n.to > current.from)) {   // overlap
+              queue.push(n);
             }
           }
         }
+        return connected;
+      }
+
+      // Find which emphasis node(s) contain the cursor
+      let cursorNodes = allEmphasis.filter(n => cursor.from >= n.from && cursor.to <= n.to);
+      
+      // Build the connected chain for all cursor nodes
+      let activeKeys = new Set<string>();
+      for (let cn of cursorNodes) {
+        let chain = findConnected(allEmphasis, cn);
+        for (let k of chain) activeKeys.add(k);
+      }
+      
+      // Convert keys back to ranges
+      let activeRanges = Array.from(activeKeys).map(k => {
+        let [f, t] = k.split('-').map(Number);
+        return { from: f, to: t };
       });
 
       tree.iterate({
@@ -105,6 +106,7 @@ export default class RichEditPlugin implements PluginValue {
           if (node.name === 'FencedCode')
             widgets.push(decorationCode.range(node.from, node.to));
 
+          // Skip hiding for emphasis in active ranges
           if ((node.name.startsWith('ATXHeading') || tokenElement.includes(node.name)) &&
             cursor.from >= node.from && cursor.to <= node.to)
             return false;
@@ -117,16 +119,15 @@ export default class RichEditPlugin implements PluginValue {
             widgets.push(decorationHidden.range(node.from, node.to + 1));
 
           if (tokenHidden.includes(node.name)) {
+            // Check if this mark belongs to an active emphasis range
             if (node.name === 'EmphasisMark') {
               let parent = node.node.parent;
-              let isAffected = incomplete.some(inc =>
-                (node.from >= inc.from && node.to <= inc.to) ||
-                (parent && (parent.name === 'Emphasis' || parent.name === 'StrongEmphasis') && (
-                  (inc.from >= parent.from && inc.from < parent.to) ||
-                  (parent.from >= inc.from && parent.from < inc.to)
-                ))
-              );
-              if (isAffected) return;
+              if (parent && (parent.name === 'Emphasis' || parent.name === 'StrongEmphasis')) {
+                let isActive = activeRanges.some(r => 
+                  r.from === parent.from && r.to === parent.to
+                );
+                if (isActive) return; // Don't hide this mark
+              }
             }
             widgets.push(decorationHidden.range(node.from, node.to));
           }
