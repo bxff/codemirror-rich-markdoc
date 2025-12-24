@@ -1,30 +1,12 @@
-// incomplete-emphases.ts
-//
-// Extended emphasis parsing that handles incomplete (unclosed) emphasis delimiters.
-// This parser allows emphasis like `*text` to be parsed even without a closing
-// delimiter, with the emphasis extending to the end of the inline context.
-//
-// Key differences from standard emphasis parsing:
-// - Incomplete emphasis: Unmatched openers create emphasis extending to block end
-// - Atomic matching: `**` is treated atomically (won't split into `*` for italic)
-// - Max 3 asterisks: Delimiter consumption is limited to 3 asterisks
-// - Overlap splitting: When emphasis spans overlap, they are split at boundaries
-//
-// Implementation follows the same single-pass algorithm as the official
-// resolveMarkers in @lezer/markdown, with atomic matching and overlap handling.
-// This maintains incremental parsing performance.
-//
-// Example: `For *italics and **italics-bold* bold only**`
-// Results in: Emphasis wrapping "italics and **italics-bold", with StrongEmphasis
-// starting inside the Emphasis and continuing after it (split at the boundary).
-
-import { InlineContext, MarkdownConfig, Element } from "@lezer/markdown"
+import { InlineContext, Element } from "@lezer/markdown"
+import type { MarkdownConfig } from "@lezer/markdown"
+import { tags as t } from "@lezer/highlight"
 
 /// Punctuation characters used for flanking checks (CommonMark spec).
 export let Punctuation = /[!"#$%&'()*+,\-.\/:;<=>?@\[\\\]^_`{|}~\xA1\u2010-\u2027]/
 try { Punctuation = new RegExp("[\\p{S}|\\p{P}]", "u") } catch (_) {}
 
-const enum Mark { Open = 1, Close = 2 }
+const Mark = { Open: 1, Close: 2 }
 
 /// Delimiter type for emphasis markers.
 interface DelimiterType {
@@ -37,12 +19,16 @@ const EmphasisAsterisk: DelimiterType = { resolve: "Emphasis", mark: "EmphasisMa
 
 /// Represents an inline delimiter that may open or close emphasis.
 class InlineDelimiter {
-  constructor(
-    readonly type: DelimiterType,
-    public from: number,
-    public to: number,
-    public side: Mark
-  ) {}
+  readonly type: DelimiterType
+  public from: number
+  public to: number
+  public side: number
+  constructor(type: DelimiterType, from: number, to: number, side: number) {
+    this.type = type
+    this.from = from
+    this.to = to
+    this.side = side
+  }
 }
 
 /// Intermediate representation of an emphasis segment before tree building.
@@ -58,102 +44,189 @@ interface Segment {
 /// Incomplete emphasis extension. Parses emphasis delimiters and handles
 /// cases where delimiters are not properly closed, extending the emphasis
 /// to the end of the block.
-///
-/// This is a MarkdownExtension that can be passed to the markdown parser's
-/// configure method.
 export const IncompleteEmphasis: MarkdownConfig = {
+  defineNodes: [{
+    name: "Emphasis",
+    style: { "Emphasis/...": t.emphasis }
+  }, {
+    name: "StrongEmphasis",
+    style: { "StrongEmphasis/...": t.strong }
+  }, {
+    name: "EmphasisMark",
+    style: t.processingInstruction
+  }],
   parseInline: [{
     name: "IncompleteEmphasis",
-    parse(cx, _next, start) {
-      let delims: InlineDelimiter[] = []
-
-      // Phase 1: Collect all emphasis delimiters in the inline context.
-      // This follows the same flanking rules as CommonMark.
-      while (start <= cx.end) {
-        let ch = cx.char(start)
-        if (ch != 95 /* '_' */ && ch != 42 /* '*' */) { start++; continue }
-
-        let pos = start + 1
-        while (cx.char(pos) == ch) pos++
-
-        let before = cx.slice(start - 1, start), after = cx.slice(pos, pos + 1)
-        let pBefore = Punctuation.test(before), pAfter = Punctuation.test(after)
-        let sBefore = /\s|^$/.test(before), sAfter = /\s|^$/.test(after)
-
-        // CommonMark flanking rules
-        let leftFlanking = !sAfter && (!pAfter || sBefore || pBefore)
-        let rightFlanking = !sBefore && (!pBefore || sAfter || pAfter)
-
-        let canOpen = leftFlanking && (ch == 42 || !rightFlanking || pBefore)
-        let canClose = rightFlanking && (ch == 42 || !leftFlanking || pAfter)
-
-        delims.push(new InlineDelimiter(
-          ch == 95 ? EmphasisUnderscore : EmphasisAsterisk,
-          start, pos,
-          (canOpen ? Mark.Open : 0) | (canClose ? Mark.Close : 0)
-        ))
-        start = pos
+    parse(cx: any, next: number, start: number) {
+      if (next != 95 /* '_' */ && next != 42 /* '*' */) return -1
+      
+      // Hook the resolver if not already hooked
+      if (cx.resolveMarkers != resolveIncompleteEmphasis) {
+        cx.originalResolveMarkers = cx.resolveMarkers
+        cx.resolveMarkers = resolveIncompleteEmphasis
       }
 
-      // Phase 2: Resolve markers and collect segments
-      let segments = collectSegments(delims, cx.end)
+      // 1. Scan the current delimiter run (atomic per-position parsing)
+      let pos = start + 1
+      while (cx.char(pos) == next) pos++
+      
+      // 2. Check flanking rules (same as CommonMark)
+      let before = cx.slice(start - 1, start), after = cx.slice(pos, pos + 1)
+      let pBefore = Punctuation.test(before), pAfter = Punctuation.test(after)
+      let sBefore = /\s|^$/.test(before), sAfter = /\s|^$/.test(after)
+      let leftFlanking = !sAfter && (!pAfter || sBefore || pBefore)
+      let rightFlanking = !sBefore && (!pBefore || sAfter || pAfter)
+      let canOpen = leftFlanking && (next == 42 || !rightFlanking || pBefore)
+      let canClose = rightFlanking && (next == 42 || !leftFlanking || pAfter)
 
-      // Phase 3: Build tree with overlap splitting
-      let elements = buildTree(segments, cx)
-
-      // Sort elements by position (from ascending, to descending for nesting)
-      elements.sort((a, b) => a.from - b.from || b.to - a.to)
-      for (let elt of elements) {
-        cx.addElement(elt)
-      }
-
-      return start
+      // 3. Add the delimiter to cx.parts
+      return cx.append(new InlineDelimiter(
+        next == 95 ? EmphasisUnderscore : EmphasisAsterisk,
+        start, pos,
+        (canOpen ? Mark.Open : 0) | (canClose ? Mark.Close : 0)
+      ))
     },
-    before: "Emphasis"
+    before: "Emphasis" 
   }]
 }
 
-// For backwards compatibility
 export const IncompleteEmp = IncompleteEmphasis
 
-/// Collect segments by matching delimiters. This is a single-pass algorithm that:
-/// 1. Scans forward looking for closing tokens
-/// 2. For each closer, finds the nearest matching opener
-/// 3. Creates segments and shrinks remaining delimiters
-/// 4. Handles incomplete (unmatched) openers at the end
+function resolveIncompleteEmphasis(this: any, from: number) {
+  // 1. Locate all Emphasis delimiters in the current scope (from `from` to end)
+  let delims: InlineDelimiter[] = []
+  
+  for (let i = from; i < this.parts.length; i++) {
+    let part = this.parts[i]
+    if (part instanceof InlineDelimiter && 
+       (part.type == EmphasisUnderscore || part.type == EmphasisAsterisk)) {
+      delims.push(part)
+    }
+  }
+
+  // 2. If no emphasis delimiters, just delegate to original resolver
+  if (delims.length == 0) {
+    return this.originalResolveMarkers(from)
+  }
+
+  // 3. Run the matching algorithm
+  let effectiveEnd = this.end
+  let segments = collectSegments(delims, effectiveEnd)
+
+  // 4. Build the tree of elements
+  let elements = buildTree(segments, this)
+
+  // 5. Replace the delimiters in `this.parts` with the resulting elements, enriched with content
+  let emphasisDelims = new Set(delims);
+  
+  // Helper to fill element children with parts
+  function enrichElementWithParts(elt: Element, cx: any) {
+     let newChildren: (Element | any)[] = []
+     let children = ((elt as any).children as Element[]) || []
+
+     let lastPos = elt.from
+     
+     for (let child of children) {
+        appendParts(newChildren, lastPos, child.from, cx)
+        if (child.type !== (cx as any).parser.getNodeType("EmphasisMark").id) {
+           enrichElementWithParts(child, cx)
+        }
+        newChildren.push(child)
+        lastPos = child.to
+     }
+     
+     appendParts(newChildren, lastPos, elt.to, cx)
+     ;(elt as any).children = newChildren
+  }
+  
+  function appendParts(target: any[], from: number, to: number, cx: any) {
+     for (let part of cx.parts) {
+       if (!part) continue
+       if (part.from >= from && part.to <= to) {
+         if (emphasisDelims.has(part as any)) continue
+         target.push(part)
+       }
+     }
+  }
+
+  let cx_ = this
+  elements.forEach(e => enrichElementWithParts(e, cx_))
+  
+  let newParts: any[] = []
+  let partIdx = from 
+  
+  elements.sort((a, b) => a.from - b.from)
+  
+  let currentElementIdx = 0
+  
+  while (partIdx < this.parts.length) {
+     let part = this.parts[partIdx]
+     if (!part) { partIdx++; continue }
+     
+     if (emphasisDelims.has(part as any)) {
+       partIdx++
+       continue
+     }
+     
+     while (currentElementIdx < elements.length) {
+       let elt = elements[currentElementIdx]
+       if (elt.from <= part.from) {
+         newParts.push(elt)
+         currentElementIdx++
+       } else {
+         break
+       }
+     }
+     
+     let inside = false
+     if (newParts.length > 0) {
+        let last = newParts[newParts.length - 1]
+        if (last instanceof Element) {
+           let name = (this as any).parser.nodeSet.types[last.type].name
+           if (name == "Emphasis" || name == "StrongEmphasis") {
+              if (part.from >= last.from && part.to <= last.to) {
+                inside = true
+              }
+           }
+        }
+     }
+     
+     if (!inside) {
+        newParts.push(part)
+     }
+     
+     partIdx++
+  }
+  
+  while (currentElementIdx < elements.length) {
+    newParts.push(elements[currentElementIdx++])
+  }
+  
+  let kept = this.parts.slice(0, from)
+  this.parts = kept.concat(newParts)
+  
+  return this.originalResolveMarkers(from)
+}
+
 function collectSegments(delims: InlineDelimiter[], blockEnd: number): Segment[] {
   let segments: Segment[] = []
-  
-  // Make a copy so we can mutate during matching
   let parts = delims.map(d => new InlineDelimiter(d.type, d.from, d.to, d.side))
 
-  // Single pass: scan forward looking for closing tokens
   for (let i = 0; i < parts.length; i++) {
     let close = parts[i]
     if (!close || !(close.side & Mark.Close)) continue
-
     let closeSize = close.to - close.from
     if (closeSize == 0) continue
 
-    // Scan backwards for a matching opener
     let openIdx = -1
     for (let j = i - 1; j >= 0; j--) {
       let open = parts[j]
       if (!open || !(open.side & Mark.Open) || open.type != close.type) continue
-
       let openSize = open.to - open.from
       if (openSize == 0) continue
 
-      // Determine size to consume: minimum of 2, openSize, closeSize
       let size = Math.min(2, openSize, closeSize)
-
-      // Atomic matching: if size would be 1 but either delimiter is exactly 2,
-      // skip this match. This ensures `**` is treated as a single unit for bold
-      // and won't partially match with `*` for italic.
       if (size == 1 && (openSize == 2 || closeSize == 2)) continue
-
-      // CommonMark Rule 14: when both delimiters can open and close,
-      // the sum of lengths must not be multiple of 3 unless both are.
       if ((open.side & Mark.Close || close.side & Mark.Open) &&
           (openSize + closeSize) % 3 == 0 && (openSize % 3 || closeSize % 3)) continue
 
@@ -166,26 +239,20 @@ function collectSegments(delims: InlineDelimiter[], blockEnd: number): Segment[]
     let open = parts[openIdx]
     let openSize = open.to - open.from
     let size = Math.min(2, openSize, closeSize)
-
-    // Create segment
     let type = size == 1 ? "Emphasis" : "StrongEmphasis"
     let start = open.to - size
     let end = close.from + size
 
     segments.push({
-      type,
-      from: start,
-      to: end,
-      markSizeOpen: open.to - open.from,  // Full original mark size
-      markSizeClose: close.to - close.from
+      type, from: start, to: end,
+      markSizeOpen: size,
+      markSizeClose: size
     })
 
-    // Shrink delimiters, limiting to max 1 additional asterisk (total max 3)
     let remainingOpen = openSize - size
     if (remainingOpen > 0) {
-      let newFrom = Math.max(open.from, start - 1)  // Limit to 1 extra char
       open.to = start
-      open.from = newFrom
+      // Keep from as is, the delimiter shrinks from the right
       if (open.to <= open.from) parts[openIdx] = null!
     } else {
       parts[openIdx] = null!
@@ -193,48 +260,34 @@ function collectSegments(delims: InlineDelimiter[], blockEnd: number): Segment[]
 
     let remainingClose = closeSize - size
     if (remainingClose > 0) {
-      let newTo = Math.min(close.to, end + 1)  // Limit to 1 extra char
       close.from = end
-      close.to = newTo
+      // Keep to as is, the delimiter shrinks from the left
       if (close.to <= close.from) parts[i] = null!
-      else i--  // Reprocess remaining closer
+      else i--
     } else {
       parts[i] = null!
     }
   }
 
-  // Handle incomplete: remaining openers extend to block end
   for (let d of parts) {
     if (!d || !(d.side & Mark.Open)) continue
-
     let remaining = d.to - d.from
     while (remaining > 0) {
       let size = remaining >= 2 ? 2 : 1
       let type = size == 1 ? "Emphasis" : "StrongEmphasis"
-
       segments.push({
-        type,
-        from: d.to - remaining,
-        to: blockEnd,
-        markSizeOpen: d.to - d.from,
-        markSizeClose: 0  // No closing mark (incomplete)
+        type, from: d.to - remaining, to: blockEnd,
+        markSizeOpen: size,
+        markSizeClose: 0
       })
-
       remaining -= size
     }
   }
-
   return segments
 }
 
-/// Build a properly nested tree from segments, splitting overlapping segments
-/// at boundaries. When segment A contains the start of segment B but B extends
-/// beyond A, B is split into two parts: one nested inside A (incomplete) and
-/// one as a sibling after A (also incomplete).
 function buildTree(segments: (Segment | null)[], cx: InlineContext): Element[] {
   let result: Element[] = []
-
-  // Sort by position: from ascending, then to descending (larger spans first)
   segments.sort((a, b) => {
     if (!a || !b) return 0
     return a.from - b.from || b.to - a.to
@@ -245,54 +298,48 @@ function buildTree(segments: (Segment | null)[], cx: InlineContext): Element[] {
     let s = segments[i]
     if (!s || s.from < pos) continue
 
-    // Collect children: segments that start within this segment
     let inner: (Segment | null)[] = []
     for (let j = i + 1; j < segments.length; j++) {
       let other = segments[j]
       if (!other || other.from >= s.to) break
 
+      let contentStart = s.from + s.markSizeOpen
+      let contentEnd = s.to - s.markSizeClose
+
+      // Part within content
+      if (other.from < contentEnd && other.to > contentStart) {
+         let start = Math.max(other.from, contentStart)
+         let end = Math.min(other.to, contentEnd)
+         if (start < end) {
+            inner.push({ 
+               ...other, 
+               from: start, 
+               to: end, 
+               markSizeClose: end == other.to ? other.markSizeClose : 0, 
+               markSizeOpen: start == other.from ? other.markSizeOpen : 0 
+            })
+         }
+      }
+      
+      // Part continuing after
       if (other.to > s.to) {
-        // Overlapping! Split the segment at s.to
-        // Inner part: truncated to s.to with no close mark
-        inner.push({
-          ...other,
-          to: s.to,
-          markSizeClose: 0
-        })
-        // Outer remainder: from s.to to original end with no open mark
-        segments[j] = {
-          ...other,
-          from: s.to,
-          markSizeOpen: 0
-        }
+         segments[j] = { ...other, from: s.to, markSizeOpen: 0 }
       } else {
-        // Fully contained
-        inner.push(other)
-        segments[j] = null
+         segments[j] = null
       }
     }
 
-    // Build children for this segment
     let children: Element[] = []
-    
-    // Add EmphasisMark for opening if present
-    if (s.type !== "EmphasisMark" && s.markSizeOpen > 0) {
+    if (s.type !== "EmphasisMark" && s.markSizeOpen > 0)
       children.push(cx.elt("EmphasisMark", s.from, s.from + s.markSizeOpen))
-    }
-
-    // Recursively build inner segments
-    if (inner.length > 0) {
-      children.push(...buildTree(inner, cx))
-    }
-
-    // Add EmphasisMark for closing if present
-    if (s.type !== "EmphasisMark" && s.markSizeClose > 0) {
+    
+    if (inner.length > 0) children.push(...buildTree(inner, cx))
+    
+    if (s.type !== "EmphasisMark" && s.markSizeClose > 0)
       children.push(cx.elt("EmphasisMark", s.to - s.markSizeClose, s.to))
-    }
 
     result.push(cx.elt(s.type, s.from, s.to, children))
     pos = s.to
   }
-
   return result
 }
