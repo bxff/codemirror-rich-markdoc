@@ -3,8 +3,10 @@ import type { MarkdownConfig } from "@lezer/markdown"
 import { tags as t } from "@lezer/highlight"
 
 /// Punctuation characters used for flanking checks (CommonMark spec).
+// Use simple regex if unicode property escapes fail or as fallback?
 export let Punctuation = /[!"#$%&'()*+,\-.\/:;<=>?@\[\\\]^_`{|}~\xA1\u2010-\u2027]/
 try { Punctuation = new RegExp("[\\p{S}|\\p{P}]", "u") } catch (_) {}
+
 
 const Mark = { Open: 1, Close: 2 }
 
@@ -60,17 +62,11 @@ export const IncompleteEmphasis: MarkdownConfig = {
     parse(cx: any, next: number, start: number) {
       if (next != 95 /* '_' */ && next != 42 /* '*' */) return -1
       
-      // Hook the resolver if not already hooked
-      if (cx.resolveMarkers != resolveIncompleteEmphasis) {
-        cx.originalResolveMarkers = cx.resolveMarkers
-        cx.resolveMarkers = resolveIncompleteEmphasis
-      }
-
-      // 1. Scan the current delimiter run (atomic per-position parsing)
+      // 1. Scan the current delimiter run
       let pos = start + 1
       while (cx.char(pos) == next) pos++
       
-      // 2. Check flanking rules (same as CommonMark)
+      // 2. Check flanking rules
       let before = cx.slice(start - 1, start), after = cx.slice(pos, pos + 1)
       let pBefore = Punctuation.test(before), pAfter = Punctuation.test(after)
       let sBefore = /\s|^$/.test(before), sAfter = /\s|^$/.test(after)
@@ -87,36 +83,37 @@ export const IncompleteEmphasis: MarkdownConfig = {
       ))
     },
     before: "Emphasis" 
-  }]
-}
+  }],
+  delimiterResolvers: [resolveIncompleteEmphasis]
+} as any
 
 export const IncompleteEmp = IncompleteEmphasis
 
-function resolveIncompleteEmphasis(this: any, from: number) {
-  // 1. Locate all Emphasis delimiters in the current scope (from `from` to end)
+function resolveIncompleteEmphasis(cx: any) {
+  // 1. Locate all Emphasis delimiters (InlineContext.parts is now public)
   let delims: InlineDelimiter[] = []
   
-  for (let i = from; i < this.parts.length; i++) {
-    let part = this.parts[i]
+  for (let i = 0; i < cx.parts.length; i++) {
+    let part = cx.parts[i]
     if (part instanceof InlineDelimiter && 
        (part.type == EmphasisUnderscore || part.type == EmphasisAsterisk)) {
       delims.push(part)
     }
   }
 
-  // 2. If no emphasis delimiters, just delegate to original resolver
-  if (delims.length == 0) {
-    return this.originalResolveMarkers(from)
-  }
+  // 2. If no emphasis delimiters, do nothing (standard resolver will run next)
+  if (delims.length == 0) return
 
   // 3. Run the matching algorithm
-  let effectiveEnd = this.end
+  // Note: cx.end might be far ahead, but we only care about parts collected so far?
+  // Actually context is the whole line/block usually.
+  let effectiveEnd = cx.end
   let segments = collectSegments(delims, effectiveEnd)
 
   // 4. Build the tree of elements
-  let elements = buildTree(segments, this)
+  let elements = buildTree(segments, cx)
 
-  // 5. Replace the delimiters in `this.parts` with the resulting elements, enriched with content
+  // 5. Replace the delimiters in `cx.parts` with the resulting elements, enriched with content
   let emphasisDelims = new Set(delims);
   
   // Helper to fill element children with parts
@@ -149,18 +146,17 @@ function resolveIncompleteEmphasis(this: any, from: number) {
      }
   }
 
-  let cx_ = this
-  elements.forEach(e => enrichElementWithParts(e, cx_))
+  elements.forEach(e => enrichElementWithParts(e, cx))
   
   let newParts: any[] = []
-  let partIdx = from 
+  let partIdx = 0 
   
   elements.sort((a, b) => a.from - b.from)
   
   let currentElementIdx = 0
   
-  while (partIdx < this.parts.length) {
-     let part = this.parts[partIdx]
+  while (partIdx < cx.parts.length) {
+     let part = cx.parts[partIdx]
      if (!part) { partIdx++; continue }
      
      if (emphasisDelims.has(part as any)) {
@@ -182,7 +178,8 @@ function resolveIncompleteEmphasis(this: any, from: number) {
      if (newParts.length > 0) {
         let last = newParts[newParts.length - 1]
         if (last instanceof Element) {
-           let name = (this as any).parser.nodeSet.types[last.type].name
+           let type: any = cx.parser.nodeSet.types[last.type]
+           let name = type ? type.name : ""
            if (name == "Emphasis" || name == "StrongEmphasis") {
               if (part.from >= last.from && part.to <= last.to) {
                 inside = true
@@ -198,14 +195,36 @@ function resolveIncompleteEmphasis(this: any, from: number) {
      partIdx++
   }
   
+  let kept = [] // We are replacing the whole list basically? Or just iterating? 
+  // Resolution hook runs *before* standard resolution. 
+  // We should rebuild cx.parts completely.
+  
   while (currentElementIdx < elements.length) {
     newParts.push(elements[currentElementIdx++])
   }
   
-  let kept = this.parts.slice(0, from)
-  this.parts = kept.concat(newParts)
+  // 6. Cleanup: Remove unmatched delimiters from parts so they are treated as text
+  // If we leave them as InlineDelimiter instances, standard parser ignores them but text is lost/unhandled?
+  // Actually, standard parser ignores them, so they stay in the tree as... nothing?
+  // InlineContext.finish() will fill gaps with text.
+  // But if parts[i] is an object, it's not a gap.
+  // So we MUST set unmatched delimiters to null to ensure they become text.
   
-  return this.originalResolveMarkers(from)
+  while (partIdx < cx.parts.length) {
+     let part = cx.parts[partIdx]
+     if (part && !newParts.includes(part) && emphasisDelims.has(part as any)) {
+         // Unmatched delimiter. 
+         // Do not push to newParts.
+         // Effectively replaced by null in new structure?
+         // No, newParts becomes cx.parts.
+         // If we skip it, it's missing from parts, so it's a gap -> text.
+     } else if (part) {
+         newParts.push(part)
+     }
+     partIdx++
+  }
+  
+  cx.parts = newParts
 }
 
 function collectSegments(delims: InlineDelimiter[], blockEnd: number): Segment[] {
@@ -248,6 +267,18 @@ function collectSegments(delims: InlineDelimiter[], blockEnd: number): Segment[]
       markSizeOpen: size,
       markSizeClose: size
     })
+
+    // STACK CLEARING: Remove all delimiters between open and close to match CommonMark behavior
+    // BUT only clear if incompatible?
+    // User wants `*italics and **bold* ...` to parse.
+    // If we clear `**` (same char type), we break overlapping.
+    // If we only clear DIFFERENT char types (e.g. `_` inside `*`), we satisfy `*a _b* c_`.
+    for (let k = openIdx + 1; k < i; k++) {
+        let intermediate = parts[k]
+        if (intermediate && intermediate.type != open.type) {
+            parts[k] = null!
+        }
+    }
 
     let remainingOpen = openSize - size
     if (remainingOpen > 0) {
