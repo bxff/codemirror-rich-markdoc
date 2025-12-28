@@ -136,20 +136,9 @@ function matchDelimiters(delims: InlineDelimiter[], blockEnd: number): Span[] {
       if ((close.side & Mark.Open || open.side & Mark.Close) &&
           (openSize + closeSize) % 3 == 0 && (openSize % 3 || closeSize % 3)) continue
 
-      // Prefer same-size matches: if sizes differ, check for a better match later
-      if (openSize != closeSize) {
-        let hasBetterMatch = false
-        for (let k = i + 1; k < parts.length; k++) {
-          let future = parts[k]
-          if ((future.side & Mark.Close) && future.type == open.type) {
-            if (future.to - future.from == openSize) {
-              hasBetterMatch = true
-              break
-            }
-          }
-        }
-        if (hasBetterMatch) continue
-      }
+      // Atomic matching: only match same-size delimiters
+      // This prevents "star stealing" where ** matches with single *
+      if (openSize != closeSize) continue
 
       let size = Math.min(2, openSize, closeSize)
       let start = open.to - size
