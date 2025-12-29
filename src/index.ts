@@ -3,7 +3,7 @@ import { syntaxHighlighting } from '@codemirror/language';
 import { markdown } from '@codemirror/lang-markdown';
 
 import tagParser from './tagParser';
-import { IncompleteEmp } from './incomplete-emphases';
+import { PartialEmphasis as IncompleteEmp } from '../lezer-markdown-partial-emphasis/extension/partial-emphases';
 import highlightStyle from './highlightStyle';
 import RichEditPlugin from './richEdit';
 import renderBlock from './renderBlock';

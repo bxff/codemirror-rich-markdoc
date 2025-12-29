@@ -1,0 +1,3 @@
+[submodule "lezer-markdown-partial-emphasis"]
+	path = lezer-markdown-partial-emphasis
+	url = https://github.com/bxff/lezer-markdown-partial-emphasis.git
